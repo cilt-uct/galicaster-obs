@@ -31,10 +31,10 @@ def print_message(message):
 
 def start_recording():
     def process():
-	logger.info("Trying to start recording")
-        recorder = context.get_recorder()
+        logger.info("Trying to start recording")
         if recorder.is_recording():
-            logger.info("Couldn't start capture")
+            Gdk.threads_add_idle(GLib.PRIORITY_HIGH, recorder.stop)
+            logger.info("Couldn't start capture")            
         else:
             recorder.record(None)
             logger.info("Signal to start recording sent")
@@ -51,17 +51,17 @@ def init():
         # Use the first one, as this is just for testing purposes
         my_wheel = PowerMateWheel(device[0])
         my_wheel.set_logger(logger) 
-        
+
         # Add event handlers
         my_wheel.on('press', print_message('Down'))
         #my_wheel.on('depress', print_message('Up'))
-	my_wheel.on('depress', start_recording()) #print_message('Up'))
+        my_wheel.on('depress', start_recording()) #print_message('Up'))
 
         logger.error('PowerMate Running')
 
         # Start listening
         p_thread = threading.Thread(target=my_wheel.listen)
-	p_thread.setDaemon(True)
+        p_thread.setDaemon(True)
         p_thread.start()
 
     except ValueError:
