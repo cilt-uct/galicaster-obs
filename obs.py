@@ -4,6 +4,7 @@ import json
 import math
 import threading
 import tempfile
+import serial.tools.list_ports
 from bottle import route, run, response, abort, request, install
 from gi.repository import GObject, Gdk, GLib
 
@@ -17,15 +18,19 @@ from evdev import InputDevice, ecodes, list_devices
 import logging
 import errno
 
-from collections import namedtuple
 import requests
-import datetime
+from collections import namedtuple
+from datetime import timedelta, datetime, tzinfo
+from dateutil.parser import parse
+from tzlocal import get_localzone
 
 conf = context.get_conf()
 dispatcher = context.get_dispatcher()
 logger = context.get_logger()
 repo = context.get_repository()
 recorder = context.get_recorder()
+my_lights = []
+url = "http://camonitor.uct.ac.za/obs-api/event/"
 
 # Simple function to print a message on each event
 def print_message(message):
@@ -45,7 +50,22 @@ def start_recording():
     return process
 
 def check_recordings():
+    my_response = requests.get(url)
 
+    if (my_response.ok):
+        logger.info("getting calendar events ...")
+        x = json.loads(my_response.content, object_hook=lambda d: namedtuple('X', d.keys())(*d.values()))
+        now = datetime.now(GMT2())
+        logger.info("Now: "+ str(now.astimezone(get_localzone())))
+
+        for line in x:
+            #if line.ocSeries is not None:
+                start = parse(line.start.dateTime + 'Z')
+                end = parse(line.start.dateTime + 'Z')
+                if start < now < end:
+                    logger.info("scheduled event")
+                else:
+                    logger.info("no event")
 
 def init():
     try:
@@ -71,7 +91,17 @@ def init():
         p_thread.setDaemon(True)
         p_thread.start()
 
-        dispatcher.connect("timer-long", check_next_recording)
+        # set up the lights
+        arduino_ports = [
+            p.device
+            for p in serial.tools.list_ports.comports()
+            if ('Serial' in p.description) or ('Arduino' in p.description) or (p.device.startswith('/dev/ttyACM'))
+        ]
+
+        for p in arduino_ports:
+            my_lights.append( serial.Serial(p, 115200))
+        
+        dispatcher.connect("timer-long", check_recordings)
 
     except ValueError:
         pass
@@ -221,3 +251,18 @@ def find_wheels():
         raise DeviceNotFound
 
     return wheels
+
+class GMT2(tzinfo):
+    def utcoffset(self, dt):
+        return timedelta(hours=2) + self.dst(dt)
+    def dst(self, dt):
+        d = datetime(dt.year, 4, 1)
+        self.dston = d - timedelta(days=d.weekday() + 1)
+        d = datetime(dt.year, 11, 1)
+        self.dstoff = d - timedelta(days=d.weekday() + 1)
+        if self.dston <=  dt.replace(tzinfo=None) < self.dstoff:
+            return timedelta(hours=1)
+        else:
+            return timedelta(0)
+    def tzname(self,dt):
+        return "GMT +2"
