@@ -64,5 +64,11 @@ sudo pip install evdev==0.5.0
 sudo pip install --upgrade git+https://github.com/gvalkov/python-evdev.git@631e2d32d7bdf38e3d7a5c850c9f5869d61e9183
 ```
 
+```
 sudo usermod -a -G dialout galicaster
+sudo usermod -a -G input galicaster
 sudo usermod -a -G tty galicaster
+
+pip install tzlocal
+pip install requests
+```
