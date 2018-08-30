@@ -1,36 +1,30 @@
-import os
-import time
-import json
-import math
-import threading
-import tempfile
-import serial.tools.list_ports
-from bottle import route, run, response, abort, request, install
-from gi.repository import GObject, Gdk, GLib
-
-from galicaster.core import context
-from galicaster.mediapackage.serializer import set_manifest
-from galicaster.utils import readable
-from galicaster.utils import ical
-from galicaster.utils.miscellaneous import get_screenshot_as_pixbuffer
-
-from evdev import InputDevice, ecodes, list_devices
-import logging
-import errno
-
 import requests
 from collections import namedtuple
 from datetime import timedelta, datetime, tzinfo
 from dateutil.parser import parse
 from tzlocal import get_localzone
+from time import sleep
+from galicaster.mediapackage import mediapackage
+import json
+
+import threading
+from gi.repository import GObject, Gdk, GLib
+
+import serial.tools.list_ports
+from galicaster.core import context
+from evdev import InputDevice, ecodes, list_devices
+
+import logging
+import errno
 
 conf = context.get_conf()
 dispatcher = context.get_dispatcher()
 logger = context.get_logger()
 repo = context.get_repository()
 recorder = context.get_recorder()
-my_lights = []
-url = "http://camonitor.uct.ac.za/obs-api/event/"
+
+url = "https://camonitor.uct.ac.za/obs-api/event/"
+current_mediapackage = None
 
 # Simple function to print a message on each event
 def print_message(message):
@@ -38,36 +32,23 @@ def print_message(message):
         logger.info(message)
     return dumb_echo
 
-def start_recording():
+def start_recording(obs):
     def process():
-        logger.info("Trying to start recording")
+        logger.info("Button Pressed: ")
         if recorder.is_recording():
+            obs.set_recording(False)
             Gdk.threads_add_idle(GLib.PRIORITY_HIGH, recorder.stop)
-            logger.info("Couldn't start capture")            
+            logger.info("# Stopping Recording")
+            current_mediapackage = None
         else:
-            recorder.record(None)
-            logger.info("Signal to start recording sent")
+            obs.set_recording(True)
+            current_mediapackage = obs.create_mp()
+            recorder.record(current_mediapackage)
+            logger.info("# Start Recording")
     return process
 
-def check_recordings():
-    my_response = requests.get(url)
-
-    if (my_response.ok):
-        logger.info("getting calendar events ...")
-        x = json.loads(my_response.content, object_hook=lambda d: namedtuple('X', d.keys())(*d.values()))
-        now = datetime.now(GMT2())
-        logger.info("Now: "+ str(now.astimezone(get_localzone())))
-
-        for line in x:
-            #if line.ocSeries is not None:
-                start = parse(line.start.dateTime + 'Z')
-                end = parse(line.start.dateTime + 'Z')
-                if start < now < end:
-                    logger.info("scheduled event")
-                else:
-                    logger.info("no event")
-
 def init():
+    obs = OBSPlugin(logger, url)
     try:
         # Attempt to find a powermate wheel
         try:
@@ -77,12 +58,12 @@ def init():
 
         # Use the first one, as this is just for testing purposes
         my_wheel = PowerMateWheel(device[0])
-        my_wheel.set_logger(logger) 
+        my_wheel.set_logger(logger)
 
         # Add event handlers
         my_wheel.on('press', print_message('Down'))
         #my_wheel.on('depress', print_message('Up'))
-        my_wheel.on('depress', start_recording()) #print_message('Up'))
+        my_wheel.on('depress', start_recording(obs)) #print_message('Up'))
 
         logger.info('PowerMate Running...')
 
@@ -91,20 +72,155 @@ def init():
         p_thread.setDaemon(True)
         p_thread.start()
 
-        # set up the lights
+    except ValueError:
+        pass
+
+class OBSPlugin():
+    def __init__(self, _logger, _url):
+        self.__logger = _logger
+        self.url = _url
+
+        self.__logger.info("obs initializing...")
         arduino_ports = [
             p.device
             for p in serial.tools.list_ports.comports()
             if ('Serial' in p.description) or ('Arduino' in p.description) or (p.device.startswith('/dev/ttyACM'))
         ]
 
+        self.lights = []
         for p in arduino_ports:
-            my_lights.append( serial.Serial(p, 115200))
-        
-        dispatcher.connect("timer-long", check_recordings)
+            self.lights.append(serial.Serial(p, 115200))
 
-    except ValueError:
-        pass
+        self.upcoming_time = 1000
+        self.error = False
+        self.end_time = None
+        self.is_recording = False
+        self.state = 0
+        self.details = None
+
+        dispatcher.connect('timer-short', self._handle_timer)
+
+        # make sure led is off when plugin starts
+        sleep(2) # arduino initialize timer
+        self.set_status(0)
+        self.__logger.info("obs initializing...Done")
+
+    def _handle_timer(self, sender):
+
+        my_response = requests.get(url)
+
+        self.__logger.info("handling timer")
+
+        if (my_response.ok):
+            x = json.loads(my_response.content, object_hook=lambda d: namedtuple('X', d.keys())(*d.values()))
+            self.__logger.info(x)
+            now = datetime.now(GMT2())
+            self.__logger.info("getting calendar events : " + str(now.astimezone(get_localzone())) +" ["+ str(self.is_recording) +"]")
+            isCurrent = False
+            for line in x:
+                #if line.ocSeries is not None:
+                self.__logger.info(line.ocSeries)
+                start = parse(line.start.dateTime + 'Z')
+                end = parse(line.end.dateTime + 'Z')
+                if start < now < end:
+                    self.__logger.info("scheduled event: " + str(start.astimezone(get_localzone())))
+                    self.state = 1
+                    self.end_time = end
+                    isCurrent = True
+                    if self.details is None:
+                        self.details = {
+                            'series': line.ocSeries,
+                            'seriesTitle': line.ocSeriesTitle,
+                            'title': line.subject,
+                            'organizer': line.organizer.emailAddress.name,
+                            'organizerEmail': line.organizer.emailAddress.address,
+                            'take': 0
+                        }
+                        recorder.obs_presenter = line.organizer.emailAddress.name
+                else:
+                    self.__logger.info("no event: " + str(start.astimezone(get_localzone())))
+
+            if isCurrent is False:
+                self.__logger.info("no current session")
+                self.state = 0
+                self.end_time = None
+                self.details = None
+                recorder.obs_presenter = None
+            else:
+                self.state = 1
+
+           # dispatcher.emit('obs-details', self.details)
+                
+        # if we are not recording then play with the lights - otherwise NO
+        if not self.is_recording:
+            self.set_status(self.state)
+
+    def set_recording(self, is_recording):
+        self.is_recording = is_recording
+        now = datetime.now(GMT2())
+
+        if is_recording:
+            self.state = 2
+        else:    
+            if self.end_time is not None:
+                if now < self.end_time:
+                    self.__logger.info("@ Still shceduled time")
+                    self.state = 1
+                else:
+                    self.__logger.info("@ Past Time")
+                    self.state = 0
+            else:
+                self.__logger.info("@ No Time")
+                self.state = 0
+        
+        self.set_status(self.state)
+
+    def set_status(self, status):
+        self.__logger.info('switching to ' + str(status))
+        if status == 0:
+            for p in self.lights:
+                p.write('SetLed,0,0,0;')
+        elif status == 2: # RECORDING_STATUS:
+            for p in self.lights:
+                p.write('SetLed,1,0,0;')
+        elif status == 1:
+            for p in self.lights:
+                p.write('SetLed,0,1,0;')
+
+    def create_mp(self):
+        if self.details is None:
+            return self.default_mediapackage()
+
+        self.details['take'] += 1
+        title = self.details['title'].strip() + ' - Take #' + str(self.details['take'])
+        mp = mediapackage.Mediapackage(title=title)
+        mp.setSeries({
+            'title': self.details['seriesTitle'],
+            'identifier': self.details['series']
+        })
+        return mp
+
+    def default_mediapackage(self):
+        now = datetime.now().replace(microsecond=0)
+        title = "OBS Recording started at " + now.isoformat()
+        mp = mediapackage.Mediapackage(title=title)
+        return mp
+
+
+class GMT2(tzinfo):
+    def utcoffset(self, dt):
+        return timedelta(hours=2) + self.dst(dt)
+    def dst(self, dt):
+        d = datetime(dt.year, 4, 1)
+        self.dston = d - timedelta(days=d.weekday() + 1)
+        d = datetime(dt.year, 11, 1)
+        self.dstoff = d - timedelta(days=d.weekday() + 1)
+        if self.dston <=  dt.replace(tzinfo=None) < self.dstoff:
+            return timedelta(hours=1)
+        else:
+            return timedelta(0)
+    def tzname(self,dt):
+        return "GMT +2"
 
 class PowerMateWheel():
     def __init__(self, device=None):
@@ -252,17 +368,3 @@ def find_wheels():
 
     return wheels
 
-class GMT2(tzinfo):
-    def utcoffset(self, dt):
-        return timedelta(hours=2) + self.dst(dt)
-    def dst(self, dt):
-        d = datetime(dt.year, 4, 1)
-        self.dston = d - timedelta(days=d.weekday() + 1)
-        d = datetime(dt.year, 11, 1)
-        self.dstoff = d - timedelta(days=d.weekday() + 1)
-        if self.dston <=  dt.replace(tzinfo=None) < self.dstoff:
-            return timedelta(hours=1)
-        else:
-            return timedelta(0)
-    def tzname(self,dt):
-        return "GMT +2"
