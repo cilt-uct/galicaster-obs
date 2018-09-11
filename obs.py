@@ -1,30 +1,54 @@
+import json
+import logging
+import errno
+import gi
+import re
 import requests
+import threading
+import serial.tools.list_ports
+
 from collections import namedtuple
 from datetime import timedelta, datetime, tzinfo
 from dateutil.parser import parse
 from tzlocal import get_localzone
 from time import sleep
-from galicaster.mediapackage import mediapackage
-import json
-
-import threading
-from gi.repository import GObject, Gdk, GLib
-
-import serial.tools.list_ports
-from galicaster.core import context
+from requests_futures.sessions import FuturesSession
 from evdev import InputDevice, ecodes, list_devices
 
-import logging
-import errno
+gi.require_version('Gtk', '3.0')
 
-conf = context.get_conf()
+from gi.repository import Gtk, Gdk, GdkPixbuf, GObject, Pango, GLib
+from galicaster.core import context
+from galicaster.classui import get_ui_path
+from galicaster.classui import get_image_path
+from galicaster.classui.elements.message_header import Header
+from galicaster.mediapackage import mediapackage
+from galicaster.utils.i18n import _
+
+# This is the name of this plugin's section in the configuration file
+CONFIG_SECTION = "obs"
+
+# REGEXP Defaults and Keys
+DEFAULT_REGEXP_LECTURER = "[0-9]{8}"
+DEFAULT_REGEXP_LEARNER = "[a-zA-z]{6}[0-9]{3}"
+REGEXP_LECTURER = "rexexp_lecturer"
+REGEXP_LEARNER = "rexexp_learner"
+
+# URL to request user information from
+DEFAULT_SCHEDULE_URL = "https://camonitor.uct.ac.za/obs-api/event/"
+DEFAULT_FIND_URL = "http://camonitor.uct.ac.za/obs-api/event/owner/"
+DEFAULT_CREATE_URL = "http://camonitor.uct.ac.za/obs-api/series/"
+URL_SCHEDULE = "url_schedule"
+URL_FIND = "url_find"
+URL_CREATE = "url_create"
+
+current_mediapackage = None
+
+config = context.get_conf().get_section(CONFIG_SECTION) or {}
 dispatcher = context.get_dispatcher()
 logger = context.get_logger()
 repo = context.get_repository()
 recorder = context.get_recorder()
-
-url = "https://camonitor.uct.ac.za/obs-api/event/"
-current_mediapackage = None
 
 # Simple function to print a message on each event
 def print_message(message):
@@ -36,41 +60,36 @@ def start_recording(obs):
     def process():
         logger.info("Button Pressed: ")
         if recorder.is_recording():
-            obs.set_recording(False)
-            Gdk.threads_add_idle(GLib.PRIORITY_HIGH, recorder.stop)
-            logger.info("# Stopping Recording")
-            current_mediapackage = None
+            obs.stop_recording()
         else:
-            obs.set_recording(True)
-            current_mediapackage = obs.create_mp()
-            recorder.record(current_mediapackage)
-            logger.info("# Start Recording")
+            obs.on_rec(True)
     return process
 
 def init():
-    obs = OBSPlugin(logger, url)
+
+    obs = OBSPlugin(logger, config.get(URL_SCHEDULE, DEFAULT_SCHEDULE_URL))
     try:
         # Attempt to find a powermate wheel
         try:
             device = find_wheels()
+
+            # Use the first one, as this is just for testing purposes
+            my_wheel = PowerMateWheel(device[0])
+            my_wheel.set_logger(logger)
+
+            # Add event handlers
+            my_wheel.on('press', print_message('Down'))
+            #my_wheel.on('depress', print_message('Up'))
+            my_wheel.on('depress', start_recording(obs)) #print_message('Up'))
+
+            logger.info('PowerMate Running...')
+
+            # Start listening
+            p_thread = threading.Thread(target=my_wheel.listen)
+            p_thread.setDaemon(True)
+            p_thread.start()
         except DeviceNotFound:
             logger.error('Device not found')
-
-        # Use the first one, as this is just for testing purposes
-        my_wheel = PowerMateWheel(device[0])
-        my_wheel.set_logger(logger)
-
-        # Add event handlers
-        my_wheel.on('press', print_message('Down'))
-        #my_wheel.on('depress', print_message('Up'))
-        my_wheel.on('depress', start_recording(obs)) #print_message('Up'))
-
-        logger.info('PowerMate Running...')
-
-        # Start listening
-        p_thread = threading.Thread(target=my_wheel.listen)
-        p_thread.setDaemon(True)
-        p_thread.start()
 
     except ValueError:
         pass
@@ -96,30 +115,94 @@ class OBSPlugin():
         self.end_time = None
         self.is_recording = False
         self.state = 0
-        self.details = None
+
+        self.time_details = None
+        self.user_details = None
 
         dispatcher.connect('timer-short', self._handle_timer)
+
+        # so when UI init is triggered
+        try:
+            dispatcher.connect("init", self._handle_ui)
+        except Exception as e:
+            self.__logger.error(e)
 
         # make sure led is off when plugin starts
         sleep(2) # arduino initialize timer
         self.set_status(0)
         self.__logger.info("obs initializing...Done")
 
+    def _handle_ui(self, element):
+        """
+        Add the UI elements to set the user info
+        :param element:
+        :return:
+        """
+        # load glade file
+        #builder = Gtk.Builder()
+        #builder.add_from_file(get_ui_path("camctrl-vapix.glade"))
+
+        # calculate resolution for scaling
+        #window_size = context.get_mainwindow().get_size()
+        #res = window_size[0]/1920.0
+
+        self.__ui = context.get_mainwindow().nbox.get_nth_page(0)
+
+        # so overwrite the default record button function
+        rec_button = self.__ui.gui.get_object("recbutton")
+        rec_button.connect("clicked", self.on_rec)
+        rec_button.handler_block_by_func(self.__ui.on_rec)
+
+        # add new settings tab to the notebook
+        self.box = self.__ui.gui.get_object("eventpanel") #hbox4")
+        self.title = self.__ui.gui.get_object("titlelabel")
+        #status = self.__ui.get_object("eventlabel")
+
+        new_box = Gtk.Box(spacing=0)
+        new_box.set_name("set_user_container")
+
+        label = Gtk.Label("")
+        new_box.pack_start(label, expand=False, fill=False, padding=30)
+
+        self.btn_show = Gtk.Button("Select a user...")
+        self.btn_show.set_name("set_user_btn_set")
+        self.btn_show.connect("clicked", self.button_set_user)
+        new_box.pack_start(self.btn_show, expand=True, fill=True, padding=10)
+
+        img_clear = Gtk.Image()
+        img_clear.set_from_icon_name("edit-clear-symbolic", 6)
+
+        self.btn_clear = Gtk.Button()
+        self.btn_clear.set_name("set_user_btn_clear")
+        #button.set_label("gtk-clear")
+        self.btn_clear.connect("clicked", self.button_clear_user)
+        self.btn_clear.add(img_clear)
+        self.btn_clear.set_sensitive(False) # disabled
+        new_box.pack_start(self.btn_clear, expand=True, fill=True, padding=10)
+
+        label = Gtk.Label("")
+        new_box.pack_start(label, expand=False, fill=True, padding=30)
+
+        self.box.pack_start(new_box, False, False, 10)
+        self.box.show_all()
+        self.__logger.info("Set user init done.")
+
     def _handle_timer(self, sender):
 
-        my_response = requests.get(url)
+        my_response = requests.get(self.url)
 
         self.__logger.info("handling timer")
 
         if (my_response.ok):
             x = json.loads(my_response.content, object_hook=lambda d: namedtuple('X', d.keys())(*d.values()))
-            self.__logger.info(x)
+            #self.__logger.info(x)
             now = datetime.now(GMT2())
             self.__logger.info("getting calendar events : " + str(now.astimezone(get_localzone())) +" ["+ str(self.is_recording) +"]")
             isCurrent = False
+
             for line in x:
                 #if line.ocSeries is not None:
-                self.__logger.info(line.ocSeries)
+                #self.__logger.info(line.ocSeries)
                 start = parse(line.start.dateTime + 'Z')
                 end = parse(line.end.dateTime + 'Z')
                 if start < now < end:
@@ -127,8 +210,11 @@ class OBSPlugin():
                     self.state = 1
                     self.end_time = end
                     isCurrent = True
-                    if self.details is None:
-                        self.details = {
+
+                    # new details
+                    if self.time_details is None:
+                        self.button_clear_user(None)
+                        self.time_details = {
                             'series': line.ocSeries,
                             'seriesTitle': line.ocSeriesTitle,
                             'title': line.subject,
@@ -137,20 +223,34 @@ class OBSPlugin():
                             'take': 0
                         }
                         recorder.obs_presenter = line.organizer.emailAddress.name
+                    else:
+                        # flow from one to a new one
+                        # if we have a recording and the series differ then set to new series
+                        if self.time_details['series'] != line.ocSeries:
+                            self.button_clear_user(None)
+                            self.time_details = {
+                                'series': line.ocSeries,
+                                'seriesTitle': line.ocSeriesTitle,
+                                'title': line.subject,
+                                'organizer': line.organizer.emailAddress.name,
+                                'organizerEmail': line.organizer.emailAddress.address,
+                                'take': 0
+                            }
+                            recorder.obs_presenter = self.time_details['organizer']
                 else:
-                    self.__logger.info("no event: " + str(start.astimezone(get_localzone())))
+                    recorder.obs_presenter = None
+                    #self.__logger.info("no event: " + str(start.astimezone(get_localzone())))
 
             if isCurrent is False:
                 self.__logger.info("no current session")
                 self.state = 0
                 self.end_time = None
-                self.details = None
-                recorder.obs_presenter = None
+                self.time_details = None
+                if self.user_details is None:
+                    recorder.obs_presenter = None
             else:
                 self.state = 1
 
-           # dispatcher.emit('obs-details', self.details)
-                
         # if we are not recording then play with the lights - otherwise NO
         if not self.is_recording:
             self.set_status(self.state)
@@ -161,10 +261,10 @@ class OBSPlugin():
 
         if is_recording:
             self.state = 2
-        else:    
+        else:
             if self.end_time is not None:
                 if now < self.end_time:
-                    self.__logger.info("@ Still shceduled time")
+                    self.__logger.info("@ Still scheduled time")
                     self.state = 1
                 else:
                     self.__logger.info("@ Past Time")
@@ -172,7 +272,7 @@ class OBSPlugin():
             else:
                 self.__logger.info("@ No Time")
                 self.state = 0
-        
+
         self.set_status(self.state)
 
     def set_status(self, status):
@@ -187,25 +287,94 @@ class OBSPlugin():
             for p in self.lights:
                 p.write('SetLed,0,1,0;')
 
-    def create_mp(self):
-        if self.details is None:
-            return self.default_mediapackage()
+    def button_set_user(self, button):
+        #self.__logger.info("SET USER")
+        popup = SetUserClass(self.__logger, title="Get My Info")
 
-        self.details['take'] += 1
-        title = self.details['title'].strip() + ' - Take #' + str(self.details['take'])
-        mp = mediapackage.Mediapackage(title=title)
-        mp.setSeries({
-            'title': self.details['seriesTitle'],
-            'identifier': self.details['series']
+        if popup.return_value == -10:
+            self.btn_clear.set_sensitive(True) # enabled
+            self.user_details = {
+                                'series': popup.series_id,
+                                'seriesTitle': popup.series_title,
+                                'title': popup.user_name,
+                                'organizer': popup.user_name,
+                                'organizerEmail': popup.user_email,
+                                'take': 0
+                            }
+            self.btn_show.set_label(popup.user_name +" [Change]")
+            self.title.set_text("Live with " + self.user_details['organizer'])
+            self.box.show_all()
+            #self.__logger.info("User details set to: "+ popup.id +" "+ popup.user_name)
+            recorder.obs_presenter = self.user_details['organizer']
+
+        #if popup.return_value == -7:
+            #self.__logger.info("Cancelled")
+
+    def button_clear_user(self, button):
+        #self.__logger.info("CLEAR USER")
+        self.user_details = None
+        self.btn_clear.set_sensitive(False) # disabled
+        self.btn_show.set_label("Select a user...")
+        self.title.set_text(_("No upcoming events"))
+        self.box.show_all()
+
+        if self.time_details is not None:
+            recorder.obs_presenter = self.time_details['organizer']
+        else:
+            recorder.obs_presenter = None
+        self.title.show_all()
+
+    def on_rec(self, elem):
+        global current_mediapackage, recorder
+
+        self.set_recording(True)
+        current_mediapackage = self.create_mp()
+        recorder.record(current_mediapackage)
+        self.__logger.info("# Start Recording")
+
+    def stop_recording(self):
+        global current_mediapackage, recorder
+
+        self.set_recording(False)
+        Gdk.threads_add_idle(GLib.PRIORITY_HIGH, recorder.stop)
+        self.__logger.info("# Stopping Recording")
+        current_mediapackage = None
+
+    def on_button_pressed(self):
+        def process(_s):
+            logger.info("Button pressed.")
+            if recorder.is_recording():
+                _s.stop_recording()
+            else:
+                _s.on_rec(None)
+        return process(self)
+
+    def create_mp(self):
+        if self.time_details is None:
+            if self.user_details is None:
+                return self.default_mediapackage()
+
+        details = self.time_details
+        if self.user_details is not None:
+            self.user_details['take'] += 1
+            details = self.user_details
+        else:
+            self.time_details['take'] += 1
+            details = self.time_details
+
+        title = details['title'].strip() + ' - Take #' + str(details['take'])
+        new_mp = mediapackage.Mediapackage(title=title)
+        new_mp.setSeries({
+            'title': details['seriesTitle'],
+            'identifier': details['series']
         })
-        return mp
+        return new_mp
 
     def default_mediapackage(self):
         now = datetime.now().replace(microsecond=0)
         title = "OBS Recording started at " + now.isoformat()
         mp = mediapackage.Mediapackage(title=title)
         return mp
-
 
 class GMT2(tzinfo):
     def utcoffset(self, dt):
@@ -349,10 +518,8 @@ class PowerMateWheel():
             self.__logger.debug('Error: %s' % e)
             raise e
 
-
 class DeviceNotFound(Exception):
     pass
-
 
 def find_wheels():
     devices = [InputDevice(fn) for fn in list_devices()]
@@ -368,3 +535,269 @@ def find_wheels():
 
     return wheels
 
+class SetUserClass(Gtk.Widget):
+    """
+    Handle a pop up to select a user
+    """
+    __gtype_name__ = 'SetUserClass'
+
+    def __init__(self, _logger=None, title="Get My Info"):
+        """
+        """
+        self.id = ""
+        self.user_name = ""
+        self.user_email = ""
+        self.series_id = ""
+        self.series_title = ""
+
+        self.__logger = _logger
+        self.__url = config.get(URL_FIND, DEFAULT_FIND_URL)
+        self.__create_url = config.get(URL_CREATE, DEFAULT_CREATE_URL)
+        self.__session = FuturesSession()
+
+        regexp = config.get(REGEXP_LECTURER, DEFAULT_REGEXP_LECTURER)
+        #self.__logger.info("Lecturer REGEXP = " + regexp)
+        self.__lecturer = re.compile("[0-9]{8}")
+
+        regexp = config.get(REGEXP_LEARNER, DEFAULT_REGEXP_LEARNER)
+        #self.__logger.info("Learner REGEXP = " + regexp)
+        self.__learner = re.compile("[a-zA-z]{6}[0-9]{3}")
+
+        parent = context.get_mainwindow()
+        size = parent.get_size()
+
+        self.par = parent
+        altura = size[1]
+        anchura = size[0]
+        k1 = anchura / 1920.0
+        k2 = altura / 1080.0
+        self.wprop = k1
+        self.hprop = k2
+
+        gui = Gtk.Builder()
+        gui.add_from_file(get_ui_path('set_user.glade'))
+
+        self.dialog = gui.get_object("setuserdialog")
+        self.dialog.set_property("width-request", int(anchura/2.2))
+        self.dialog.set_type_hint(Gdk.WindowTypeHint.TOOLBAR)
+        self.dialog.set_modal(True)
+        self.dialog.set_keep_above(False)
+
+        #NEW HEADER
+        strip = Header(size=size, title=title)
+        self.dialog.vbox.pack_start(strip, True, True, 0)
+        self.dialog.vbox.reorder_child(strip, 0)
+
+        self.search_field = gui.get_object("inp_search")
+        #search_field.connect('key-press-event', self.on_key_press)
+        self.search_field.connect('key-release-event', self.on_key_release)
+        self.search_field.connect('search-changed', self.search_changed)
+        self.search_field.connect('stop-search', self.search_stopped)
+
+        self.result = gui.get_object("grd_result")
+
+        if parent != None:
+            # FIXME: The keyboard plugin uses Ubuntu Onboard.
+            # https://bugs.launchpad.net/onboard/+bug/1627819
+            # There is a bug with this plugin where the "dock to edges"
+            # option does not work with the "force to top" one, causing
+            # Onboard to appear behind when Galicaster is on fullscreen.
+            # THIS affects #321. A better solution should be implemented.
+            from galicaster import plugins
+            if not parent.is_fullscreen or 'galicaster.plugins.keyboard' not in plugins.loaded:
+                self.dialog.set_transient_for(parent.get_toplevel())
+            self.dialog.set_position(Gtk.WindowPosition.CENTER_ALWAYS)
+            dialog_style_context = self.dialog.get_style_context()
+            window_classes = parent.get_style_context().list_classes()
+            for style_class in window_classes:
+                dialog_style_context.add_class(style_class)
+
+        self.dialog.show_all()
+
+        parent.get_style_context().add_class('shaded')
+        self.return_value = self.dialog.run()
+
+        parent.get_style_context().remove_class('shaded')
+        self.dialog.destroy()
+
+    def on_key_release(self, widget, ev, data=None):
+
+        #If Escape pressed, reset text
+        if ev.keyval == Gdk.KEY_Escape:
+            widget.set_text("")
+            self.clear_search_entry()
+
+        #If Enter pressed, try searching
+        if ev.keyval == Gdk.KEY_Return or ev.keyval == Gdk.KEY_KP_Enter:
+            self.do_search(widget.get_text())
+
+    def search_changed(self, widget, data=None):
+        #self.__logger.info("search_changed")
+
+        if widget.get_text() == "":
+            self.clear_search_entry()
+
+        if self.__lecturer.match(widget.get_text()): # if valid lecturer search
+            #self.__logger.info("Lecturer :) " + widget.get_text())
+            self.do_search(widget.get_text())
+
+        if self.__learner.match(widget.get_text()): # if valid learner search
+            #self.__logger.info("Learner :) " + widget.get_text())
+            self.do_search(widget.get_text())
+
+    def search_stopped(self, widget, data=None):
+        #self.__logger.info("search_stopped")
+        self.clear_search_entry()
+
+    def clear_search_entry(self):
+        self.search_field.set_text("")
+
+        for element in self.result.get_children():
+            self.result.remove(element)
+
+        label = Gtk.Label("")
+        self.result.pack_start(label, expand=False, fill=False, padding=0)
+
+    def do_search(self, value):
+        #self.__logger.info("Searching : " + self.__url + value)
+
+        #if self.__lecturer.match(value): # if valid lecturer search
+        #    self.__logger.info("Lecturer :) " + value)
+        #else:
+        #    self.__logger.info("Not Lecturer")
+
+        #if self.__learner.match(value): # if valid learner search
+        #    self.__logger.info("Learner :) " + value)
+        #else:
+        #    self.__logger.info("Not Learner")
+
+        for element in self.result.get_children():
+            self.result.remove(element)
+
+        loading_box = Gtk.Box(spacing=10)
+        loading_box.set_name("grd_result_loading")
+
+        label = Gtk.Label("")
+        loading_box.pack_start(label, expand=False, fill=False, padding=0)
+
+        spinner = Gtk.Spinner()
+        spinner.start()
+        loading_box.pack_start(spinner, expand=False, fill=False, padding=0)
+
+        label = Gtk.Label(" Searching... ")
+        loading_box.pack_start(label, expand=False, fill=False, padding=0)
+
+        label = Gtk.Label("")
+        loading_box.pack_start(label, expand=False, fill=False, padding=0)
+
+        self.result.pack_start(loading_box, expand=False, fill=False, padding=0)
+        self.result.show_all()
+
+        future = self.__session.get(self.__url + value, background_callback=self.show_response)
+        #response = future.result()
+        #self.__logger.info('response status {0}'.format(response.status_code))
+
+    def show_response(self, sess, resp):
+        self.__logger.info("request returned.")
+
+        for element in self.result.get_children():
+            self.result.remove(element)
+
+        if resp.ok:
+            details = json.loads(resp.content, object_hook=lambda d: namedtuple('X', d.keys())(*d.values()))
+
+            if details.fullname:
+                self.id = details.username
+                self.user_name = details.fullname
+                self.user_email = details.email
+
+                result_box = Gtk.Box(spacing=30)
+                result_box.set_name("grd_result_button")
+
+                button = Gtk.Button()
+                button.set_name("btn_select_user")
+                button.set_relief(Gtk.ReliefStyle.NONE)
+                button_box = Gtk.Box(spacing=10)
+                button.add(button_box)
+
+                #self.__logger.info("Found: " + details.fullname)
+                label = Gtk.Label(details.fullname)
+
+                img_series = Gtk.Image()
+
+                if details.ocSeries:
+                    img_series.set_from_icon_name("object-select-symbolic", 2)
+                    #self.__logger.info("     Series: " + details.ocSeries[0].identifier)
+                    button.connect("clicked", self.close_modal)
+                    self.series_id = details.ocSeries[0].identifier
+                    self.series_title = details.ocSeries[0].title
+                else:
+                    img_series.set_from_icon_name("star-new-symbolic", 2)
+                    button.connect("clicked", self.create_series)
+                    self.series_id = ""
+                    self.series_title = ""
+
+                button_box.pack_start(img_series, expand=False, fill=False, padding=10)
+                button_box.pack_start(label, expand=False, fill=False, padding=10)
+
+                label = Gtk.Label("select")
+                label.set_markup('<span foreground="#494941" face="sans" size="small">select</span>')
+                button_box.pack_start(label, expand=False, fill=False, padding=10)
+
+                result_box.pack_start(button, expand=True, fill=True, padding=10)
+                self.result.pack_start(result_box, expand=False, fill=False, padding=0)
+            else:
+                #self.__logger.info(":(")
+                label = Gtk.Label("No student or lecturer found.")
+                self.result.pack_start(label, expand=False, fill=False, padding=0)
+
+        else:
+            label = Gtk.Label("No student or lecturer found.")
+            self.result.pack_start(label, expand=False, fill=False, padding=0)
+
+        self.result.show_all()
+
+    def create_series(self, ev=None):
+        #self.__logger.info("creating series")
+
+        for element in self.result.get_children():
+            self.result.remove(element)
+
+        loading_box = Gtk.Box(spacing=10)
+        loading_box.set_name("grd_result_loading")
+
+        label = Gtk.Label("")
+        loading_box.pack_start(label, expand=False, fill=False, padding=0)
+
+        spinner = Gtk.Spinner()
+        spinner.start()
+        loading_box.pack_start(spinner, expand=False, fill=False, padding=0)
+
+        label = Gtk.Label(" Creating user profile... ")
+        loading_box.pack_start(label, expand=False, fill=False, padding=0)
+
+        label = Gtk.Label("")
+        loading_box.pack_start(label, expand=False, fill=False, padding=0)
+
+        self.result.pack_start(loading_box, expand=False, fill=False, padding=0)
+        self.result.show_all()
+
+        future = self.__session.post(self.__create_url + self.id, background_callback=self.set_series_close_modal)
+
+    def set_series_close_modal(self, sess, resp):
+        print resp.content
+        if resp.ok:
+            details = json.loads(resp.content, object_hook=lambda d: namedtuple('X', d.keys())(*d.values()))
+
+            if details.identifier:
+                self.series_id = details.identifier
+                self.series_title = details.title
+            else:
+                self.series_id = ""
+                self.series_title = ""
+
+        self.close_modal()
+
+    def close_modal(self, ev=None):
+        self.__logger.info("closing modal")
+        self.dialog.response(-10)

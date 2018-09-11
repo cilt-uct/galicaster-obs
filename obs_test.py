@@ -102,7 +102,7 @@ class OBSPlugin():
 
     def _handle_timer(self, sender):
 
-        my_response = requests.get(url)
+        my_response = requests.get(self.url)
 
         if (my_response.ok):
             x = json.loads(my_response.content, object_hook=lambda d: namedtuple('X', d.keys())(*d.values()))
