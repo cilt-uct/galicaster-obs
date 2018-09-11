@@ -22,9 +22,9 @@ Bus 003 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
 ```
 
 ```
-pip install PyCmdMessenger
-pip3 install PyCmdMessenger
-pip3 install pyserial
+pip install tzlocal
+pip install requests
+pip install requests_futures
 ```
 
 ```
@@ -46,19 +46,19 @@ Type "help", "copyright", "credits" or "license" for more information.
 
 from evdev import UInput, UInputError, ecodes
 Traceback (most recent call last):
-File "", line 1, in 
-File "/usr/lib64/python2.7/site-packages/evdev/init.py", line 5, in 
+File "", line 1, in
+File "/usr/lib64/python2.7/site-packages/evdev/init.py", line 5, in
 from evdev.device import DeviceInfo, InputDevice, AbsInfo
-File "/usr/lib64/python2.7/site-packages/evdev/device.py", line 7, in 
+File "/usr/lib64/python2.7/site-packages/evdev/device.py", line 7, in
 from evdev import _input, _uinput, ecodes, util
-File "/usr/lib64/python2.7/site-packages/evdev/ecodes.py", line 75, in 
+File "/usr/lib64/python2.7/site-packages/evdev/ecodes.py", line 75, in
 keys.update(BTN)
 NameError: name 'BTN' is not defined
 ```
 
 This affects at least python-evdev 0.4.5 and 0.5.0 and can be fixed by downgrading both the kernel and sys-kernel/linux-headers to version 4.3, then rebuilding python-evdev.
 
-To Fix: 
+To Fix:
 ```
 sudo pip install evdev==0.5.0
 sudo pip install --upgrade git+https://github.com/gvalkov/python-evdev.git@631e2d32d7bdf38e3d7a5c850c9f5869d61e9183
@@ -68,7 +68,4 @@ sudo pip install --upgrade git+https://github.com/gvalkov/python-evdev.git@631e2
 sudo usermod -a -G dialout galicaster
 sudo usermod -a -G input galicaster
 sudo usermod -a -G tty galicaster
-
-pip install tzlocal
-pip install requests
 ```
