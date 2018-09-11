@@ -549,6 +549,7 @@ class SetUserClass(Gtk.Widget):
         self.user_email = ""
         self.series_id = ""
         self.series_title = ""
+        self.searching = False
 
         self.__logger = _logger
         self.__url = config.get(URL_FIND, DEFAULT_FIND_URL)
@@ -648,8 +649,10 @@ class SetUserClass(Gtk.Widget):
     def search_stopped(self, widget, data=None):
         #self.__logger.info("search_stopped")
         self.clear_search_entry()
+        self.searching = False
 
     def clear_search_entry(self):
+        self.searching = False
         self.search_field.set_text("")
 
         for element in self.result.get_children():
@@ -693,12 +696,15 @@ class SetUserClass(Gtk.Widget):
         self.result.pack_start(loading_box, expand=False, fill=False, padding=0)
         self.result.show_all()
 
-        future = self.__session.get(self.__url + value, background_callback=self.show_response)
+        if not self.searching:
+            self.searching = True
+            future = self.__session.get(self.__url + value, background_callback=self.show_response)
         #response = future.result()
         #self.__logger.info('response status {0}'.format(response.status_code))
 
     def show_response(self, sess, resp):
-        self.__logger.info("request returned.")
+        #self.__logger.info("request returned.")
+        self.searching = False
 
         for element in self.result.get_children():
             self.result.remove(element)
