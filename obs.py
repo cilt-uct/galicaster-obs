@@ -229,7 +229,6 @@ class OBSPlugin():
 
                     # new details
                     if self.time_details is None:
-                        self.button_clear_user(None)
                         self.time_details = {
                             'series': line.ocSeries,
                             'seriesTitle': line.ocSeriesTitle,
@@ -238,12 +237,14 @@ class OBSPlugin():
                             'organizerEmail': line.organizer.emailAddress.address,
                             'take': 0
                         }
-                        recorder.obs_presenter = line.organizer.emailAddress.name
+                        #recorder.obs_presenter = self.time_details['organizer'] in clear
+                        self.button_clear_user(None)
+
                     else:
                         # flow from one to a new one
                         # if we have a recording and the series differ then set to new series
                         if self.time_details['series'] != line.ocSeries:
-                            self.button_clear_user(None)
+
                             self.time_details = {
                                 'series': line.ocSeries,
                                 'seriesTitle': line.ocSeriesTitle,
@@ -252,7 +253,8 @@ class OBSPlugin():
                                 'organizerEmail': line.organizer.emailAddress.address,
                                 'take': 0
                             }
-                            recorder.obs_presenter = self.time_details['organizer']
+                            #recorder.obs_presenter = self.time_details['organizer'] in clear
+                            self.button_clear_user(None)
                 else:
                     recorder.obs_presenter = None
                     #self.__logger.info("no event: " + str(start.astimezone(get_localzone())))
@@ -379,7 +381,8 @@ class OBSPlugin():
             details = self.time_details
 
         title = details['title'].strip() + ' - Take #' + str(details['take'])
-        new_mp = mediapackage.Mediapackage(title=title)
+        new_mp = mediapackage.Mediapackage(title=title, presenter=details['organizer'])
+        new_mp.setMetadataByName('source', 'Personal['+ details['series'] +']')
         new_mp.setSeries({
             'title': details['seriesTitle'],
             'identifier': details['series']
@@ -608,8 +611,8 @@ class SetUserClass(Gtk.Widget):
         self.search_field = gui.get_object("inp_search")
         #search_field.connect('key-press-event', self.on_key_press)
         self.search_field.connect('key-release-event', self.on_key_release)
-        self.search_field.connect('search-changed', self.search_changed)
-        self.search_field.connect('stop-search', self.search_stopped)
+        #self.search_field.connect('search-changed', self.search_changed)
+        #self.search_field.connect('stop-search', self.search_stopped)
 
         self.result = gui.get_object("grd_result")
 
@@ -648,6 +651,16 @@ class SetUserClass(Gtk.Widget):
         if ev.keyval == Gdk.KEY_Return or ev.keyval == Gdk.KEY_KP_Enter:
             self.do_search(widget.get_text())
 
+        if self.__lecturer.match(widget.get_text()): # if valid lecturer search
+            #self.__logger.info("Lecturer :) " + widget.get_text())
+            if not self.searching:
+                self.do_search(widget.get_text())
+
+        if self.__learner.match(widget.get_text()): # if valid learner search
+            #self.__logger.info("Learner :) " + widget.get_text())
+            if not self.searching:
+                self.do_search(widget.get_text())
+
     def search_changed(self, widget, data=None):
         #self.__logger.info("search_changed")
 
@@ -656,11 +669,13 @@ class SetUserClass(Gtk.Widget):
 
         if self.__lecturer.match(widget.get_text()): # if valid lecturer search
             #self.__logger.info("Lecturer :) " + widget.get_text())
-            self.do_search(widget.get_text())
+            if not self.searching:
+                self.do_search(widget.get_text())
 
         if self.__learner.match(widget.get_text()): # if valid learner search
             #self.__logger.info("Learner :) " + widget.get_text())
-            self.do_search(widget.get_text())
+            if not self.searching:
+                self.do_search(widget.get_text())
 
     def search_stopped(self, widget, data=None):
         #self.__logger.info("search_stopped")
@@ -678,7 +693,7 @@ class SetUserClass(Gtk.Widget):
         self.result.pack_start(label, expand=False, fill=False, padding=0)
 
     def do_search(self, value):
-        #self.__logger.info("Searching : " + self.__url + value)
+        self.__logger.info("Searching : " + self.__url + value)
 
         #if self.__lecturer.match(value): # if valid lecturer search
         #    self.__logger.info("Lecturer :) " + value)
@@ -689,6 +704,9 @@ class SetUserClass(Gtk.Widget):
         #    self.__logger.info("Learner :) " + value)
         #else:
         #    self.__logger.info("Not Learner")
+
+        self.searching = True
+        self.search_field.set_editable(False) # disabled
 
         for element in self.result.get_children():
             self.result.remove(element)
@@ -712,15 +730,12 @@ class SetUserClass(Gtk.Widget):
         self.result.pack_start(loading_box, expand=False, fill=False, padding=0)
         self.result.show_all()
 
-        if not self.searching:
-            self.searching = True
-            future = self.__session.get(self.__url + value, background_callback=self.show_response)
-        #response = future.result()
-        #self.__logger.info('response status {0}'.format(response.status_code))
+        #future = self.__session.get(self.__url + value, background_callback=self.show_response)
+        self.show_response(None, requests.get(self.__url + value)) # static request
 
     def show_response(self, sess, resp):
-        #self.__logger.info("request returned.")
-        self.searching = False
+        self.__logger.info("request returned.")
+        self.__logger.info(resp)
 
         for element in self.result.get_children():
             self.result.remove(element)
@@ -777,6 +792,8 @@ class SetUserClass(Gtk.Widget):
             label = Gtk.Label("No student or lecturer found.")
             self.result.pack_start(label, expand=False, fill=False, padding=0)
 
+        self.searching = False
+        self.search_field.set_editable(True) # enabled
         self.result.show_all()
 
     def create_series(self, ev=None):
