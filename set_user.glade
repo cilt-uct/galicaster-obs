@@ -106,7 +106,7 @@
                       </packing>
                     </child>
                     <child>
-                      <object class="GtkSearchEntry" id="inp_search">
+                      <object class="GtkEntry" id="inp_search">
                         <property name="visible">True</property>
                         <property name="can_focus">True</property>
                         <property name="max_length">9</property>
