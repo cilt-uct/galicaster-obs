@@ -136,6 +136,7 @@ class OBSPlugin():
         self.user_details = None
 
         dispatcher.connect('timer-short', self._handle_timer)
+        dispatcher.connect('record-finished', self.stop_recording)
 
         # so when UI init is triggered
         try:
@@ -350,11 +351,12 @@ class OBSPlugin():
         recorder.record(current_mediapackage)
         self.__logger.info("# Start Recording")
 
-    def stop_recording(self):
+    def stop_recording(self, element=None, mp_id=None):
         global current_mediapackage, recorder
 
         self.set_recording(False)
-        Gdk.threads_add_idle(GLib.PRIORITY_HIGH, recorder.stop)
+        if element is None:
+            Gdk.threads_add_idle(GLib.PRIORITY_HIGH, recorder.stop)
         self.__logger.info("# Stopping Recording")
         current_mediapackage = None
 
