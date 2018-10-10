@@ -605,6 +605,9 @@ class SetUserClass(Gtk.Widget):
         self.dialog.set_modal(True)
         self.dialog.set_keep_above(False)
 
+        # user select button
+        self.user_button = Gtk.Button()
+
         #NEW HEADER
         strip = Header(size=size, title=title)
         self.dialog.vbox.pack_start(strip, True, True, 0)
@@ -736,8 +739,8 @@ class SetUserClass(Gtk.Widget):
         self.show_response(None, requests.get(self.__url + value)) # static request
 
     def show_response(self, sess, resp):
-        self.__logger.info("request returned.")
-        self.__logger.info(resp)
+        self.__logger.info("GET request returned.")
+        #self.__logger.info(resp)
 
         for element in self.result.get_children():
             self.result.remove(element)
@@ -753,11 +756,11 @@ class SetUserClass(Gtk.Widget):
                 result_box = Gtk.Box(spacing=30)
                 result_box.set_name("grd_result_button")
 
-                button = Gtk.Button()
-                button.set_name("btn_select_user")
-                button.set_relief(Gtk.ReliefStyle.NONE)
+                self.user_button = Gtk.Button()
+                self.user_button.set_name("btn_select_user")
+                self.user_button.set_relief(Gtk.ReliefStyle.NONE)
                 button_box = Gtk.Box(spacing=10)
-                button.add(button_box)
+                self.user_button.add(button_box)
 
                 #self.__logger.info("Found: " + details.fullname)
                 label = Gtk.Label(details.fullname)
@@ -767,12 +770,12 @@ class SetUserClass(Gtk.Widget):
                 if details.ocSeries:
                     img_series.set_from_icon_name("object-select-symbolic", 2)
                     #self.__logger.info("     Series: " + details.ocSeries[0].identifier)
-                    button.connect("clicked", self.close_modal)
+                    self.user_button.connect("clicked", self.close_modal)
                     self.series_id = details.ocSeries[0].identifier
                     self.series_title = details.ocSeries[0].title
                 else:
                     img_series.set_from_icon_name("star-new-symbolic", 2)
-                    button.connect("clicked", self.create_series)
+                    self.user_button.connect("clicked", self.create_series)
                     self.series_id = ""
                     self.series_title = ""
 
@@ -783,7 +786,7 @@ class SetUserClass(Gtk.Widget):
                 label.set_markup('<span foreground="#494941" face="sans" size="small">select</span>')
                 button_box.pack_start(label, expand=False, fill=False, padding=10)
 
-                result_box.pack_start(button, expand=True, fill=True, padding=10)
+                result_box.pack_start(self.user_button, expand=True, fill=True, padding=10)
                 self.result.pack_start(result_box, expand=False, fill=False, padding=0)
             else:
                 #self.__logger.info(":(")
@@ -799,7 +802,13 @@ class SetUserClass(Gtk.Widget):
         self.result.show_all()
 
     def create_series(self, ev=None):
-        #self.__logger.info("creating series")
+        conf = context.get_conf()
+
+        self.__logger.info("Creating series")
+        self.__logger.info(conf.get_hostname())
+
+        if self.user_button is not None:
+            self.user_button.set_sensitive(False) # disabled
 
         for element in self.result.get_children():
             self.result.remove(element)
@@ -823,10 +832,13 @@ class SetUserClass(Gtk.Widget):
         self.result.pack_start(loading_box, expand=False, fill=False, padding=0)
         self.result.show_all()
 
-        future = self.__session.post(self.__create_url + self.id, background_callback=self.set_series_close_modal)
+        #future = self.__session.post(self.__create_url + self.id, background_callback=self.set_series_close_modal)
+        self.set_series_close_modal(None, requests.post(self.__create_url + self.id, data={'hostname': conf.get_hostname()}))
 
     def set_series_close_modal(self, sess, resp):
-        print resp.content
+        self.__logger.info("POST request returned.")
+        #self.__logger.info(resp)
+
         if resp.ok:
             details = json.loads(resp.content, object_hook=lambda d: namedtuple('X', d.keys())(*d.values()))
 
