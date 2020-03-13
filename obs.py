@@ -26,10 +26,10 @@ import serial.tools.list_ports
 from collections import namedtuple
 from datetime import timedelta, datetime, tzinfo
 from dateutil.parser import parse
+from evdev import InputDevice, ecodes, list_devices
+from string import Template
 from tzlocal import get_localzone
 from time import sleep
-from requests_futures.sessions import FuturesSession
-from evdev import InputDevice, ecodes, list_devices
 
 gi.require_version('Gtk', '3.0')
 
@@ -48,21 +48,24 @@ CONFIG_SECTION = "obs"
 DEFAULT_REGEXP = "[0-9]{8}|[a-zA-Z]{6}[0-9]{3}|[T|t][0-9]{7}"
 CONFIG_REGEXP = "rexexp"
 
+DEFAULT_SERIES_FILTER = '%2Csubject%3APersonal'
+CONFIG_SERIES_FILTER = "filter"
+
+METADATA = Template('[]')
+ACL = Template('[]')
+
 # URL to request user information from
 DEFAULT_SCHEDULE_URL = "https://camonitor.uct.ac.za/obs-api/event/"
-DEFAULT_FIND_URL = "http://camonitor.uct.ac.za/obs-api/event/owner/"
-DEFAULT_CREATE_URL = "http://camonitor.uct.ac.za/obs-api/series/"
 URL_SCHEDULE = "url_schedule"
-URL_FIND = "url_find"
-URL_CREATE = "url_create"
 
 current_mediapackage = None
 
 config = context.get_conf().get_section(CONFIG_SECTION) or {}
 dispatcher = context.get_dispatcher()
-logger = context.get_logger()
 repo = context.get_repository()
+logger = context.get_logger()
 recorder = context.get_recorder()
+oc_client = context.get_occlient()
 
 # Simple function to print a message on each event
 def print_message(message):
@@ -76,12 +79,19 @@ def start_recording(obs):
         if recorder.is_recording():
             obs.stop_recording()
         else:
-            obs.on_rec(True)
+            obs.on_rec()
     return process
 
 def init():
+    global METADATA, ACL
 
-    obs = OBSPlugin(logger, config.get(URL_SCHEDULE, DEFAULT_SCHEDULE_URL))
+    with open(get_ui_path("series_metadata_template.json"), "r") as metadataFile:
+        METADATA = Template(metadataFile.read())
+
+    with open(get_ui_path("acl_template.json"), "r") as aclFile:
+        ACL = Template(aclFile.read())
+
+    obs = OBSPlugin(logger, config.get(URL_SCHEDULE, DEFAULT_SCHEDULE_URL), oc_client)
     try:
         # Attempt to find a powermate wheel
         try:
@@ -109,9 +119,10 @@ def init():
         pass
 
 class OBSPlugin():
-    def __init__(self, _logger, _url):
+    def __init__(self, _logger, _url, _client):
         self.__logger = _logger
         self.url = _url
+        self.__oc_client = _client
 
         self.__logger.info("obs initializing...")
         arduino_ports = [
@@ -162,6 +173,7 @@ class OBSPlugin():
         #res = window_size[0]/1920.0
 
         self.__ui = context.get_mainwindow().nbox.get_nth_page(0)
+        self.__ui.connect('key-press-event', self.on_key_press)
 
         # so overwrite the default record button function
         rec_button = self.__ui.gui.get_object("recbutton")
@@ -236,7 +248,7 @@ class OBSPlugin():
                             'organizerEmail': line.organizer.emailAddress.address,
                             'take': 0
                         }
-                        #recorder.obs_presenter = self.time_details['organizer'] in clear
+                        #recorder.title_standin = self.time_details['organizer'] in clear
                         self.button_clear_user(None)
 
                     else:
@@ -252,10 +264,10 @@ class OBSPlugin():
                                 'organizerEmail': line.organizer.emailAddress.address,
                                 'take': 0
                             }
-                            #recorder.obs_presenter = self.time_details['organizer'] in clear
+                            #recorder.title_standin = self.time_details['organizer'] in clear
                             self.button_clear_user(None)
                 else:
-                    recorder.obs_presenter = None
+                    recorder.title_standin = None
                     #self.__logger.info("no event: " + str(start.astimezone(get_localzone())))
 
             if isCurrent is False:
@@ -264,7 +276,7 @@ class OBSPlugin():
                 self.end_time = None
                 self.time_details = None
                 if self.user_details is None:
-                    recorder.obs_presenter = None
+                    recorder.title_standin = None
             else:
                 self.state = 1
 
@@ -272,7 +284,23 @@ class OBSPlugin():
         if not self.is_recording:
             self.set_status(self.state)
 
+    def on_key_press(self, widget, event):
+        global recorder
+        # logger.info("Key press on widget: {}".format(widget))
+        # logger.info("          Modifiers: {}".format(event.state))
+        logger.info("      Key val, name: {} {}".format(event.keyval, Gdk.keyval_name(event.keyval)))
+
+        if (Gdk.keyval_name(event.keyval) == "Return"):
+            logger.info("      ENTER :) {}".format(recorder.is_recording()))
+            if recorder.is_recording():
+                self.stop_recording()
+            else:
+                self.on_rec()
+
+            return True
+
     def set_recording(self, is_recording):
+        self.__logger.info("setting recording")
         self.is_recording = is_recording
         now = datetime.now(GMT2())
 
@@ -305,8 +333,8 @@ class OBSPlugin():
                 p.write('SetLed,0,1,0;')
 
     def button_set_user(self, button):
-        #self.__logger.info("SET USER")
-        popup = SetUserClass(self.__logger, title="Get My Info")
+        self.__logger.info("SET USER")
+        popup = SetUserClass(self.__logger, title="Get My Info", client = self.__oc_client)
 
         if popup.return_value == -10:
             self.btn_clear.set_sensitive(True) # enabled
@@ -321,14 +349,14 @@ class OBSPlugin():
             self.btn_show.set_label(popup.user_name +" [Change]")
             self.title.set_text("Live with " + self.user_details['organizer'])
             self.box.show_all()
-            #self.__logger.info("User details set to: "+ popup.id +" "+ popup.user_name)
-            recorder.obs_presenter = self.user_details['organizer']
+            self.__logger.info("User details set to: "+ popup.id +" "+ popup.user_name)
+            recorder.title_standin = "Live with " + self.details['organizer']
 
-        #if popup.return_value == -7:
-            #self.__logger.info("Cancelled")
+        if popup.return_value == -7:
+            self.__logger.info("Cancelled")
 
     def button_clear_user(self, button):
-        #self.__logger.info("CLEAR USER")
+        self.__logger.info("CLEAR USER")
         self.user_details = None
         self.btn_clear.set_sensitive(False) # disabled
         self.btn_show.set_label("Select a user...")
@@ -336,27 +364,35 @@ class OBSPlugin():
         self.box.show_all()
 
         if self.time_details is not None:
-            recorder.obs_presenter = self.time_details['organizer']
+            recorder.title_standin = "Live with " + self.time_details['organizer']
         else:
-            recorder.obs_presenter = None
+            recorder.title_standin = None
         self.title.show_all()
 
-    def on_rec(self, elem):
+    def on_rec(self, element = None):
         global current_mediapackage, recorder
 
+        self.__logger.info("# Start Recording 1")
         self.set_recording(True)
-        current_mediapackage = self.create_mp()
-        recorder.record(current_mediapackage)
-        self.__logger.info("# Start Recording")
 
-    def stop_recording(self, element=None, mp_id=None):
+        current_mediapackage = self.create_mp()
+        if current_mediapackage is None:
+            self.__logger.info("# MP NONE")
+        else:
+            self.__logger.info(current_mediapackage.getTitle())
+            self.__logger.info(current_mediapackage.getSeries())
+
+        recorder.record(current_mediapackage)
+        self.__logger.info("# Start Recording 2")
+
+    def stop_recording(self, element = None, mp = None):
         global current_mediapackage, recorder
 
-        self.set_recording(False)
-        if element is None:
-            Gdk.threads_add_idle(GLib.PRIORITY_HIGH, recorder.stop)
         self.__logger.info("# Stopping Recording")
         current_mediapackage = None
+        self.set_recording(False)
+
+        Gdk.threads_add_idle(GLib.PRIORITY_HIGH, recorder.stop)
 
     def on_button_pressed(self):
         def process(_s):
@@ -364,13 +400,13 @@ class OBSPlugin():
             if recorder.is_recording():
                 _s.stop_recording()
             else:
-                _s.on_rec(None)
+                _s.on_rec()
         return process(self)
 
     def create_mp(self):
         if self.time_details is None:
             if self.user_details is None:
-                return self.default_mediapackage()
+                return None
 
         details = self.time_details
         if self.user_details is not None:
@@ -380,19 +416,29 @@ class OBSPlugin():
             self.time_details['take'] += 1
             details = self.time_details
 
-        title = details['title'].strip() + ' - Take #' + str(details['take'])
+        # self.__logger.info(details)
+        title = details['organizer'] + ' - Take #' + str(details['take'])
+        # self.__logger.info(title)
+
         new_mp = mediapackage.Mediapackage(title=title, presenter=details['organizer'])
         new_mp.setMetadataByName('source', 'Personal['+ details['series'] +']')
         new_mp.setSeries({
             'title': details['seriesTitle'],
             'identifier': details['series']
         })
+        # self.__logger.info(new_mp.getTitle())
         return new_mp
 
     def default_mediapackage(self):
+        global config
+
         now = datetime.now().replace(microsecond=0)
         title = "OBS Recording started at " + now.isoformat()
         mp = mediapackage.Mediapackage(title=title)
+        if (context):
+            mp.setSeries({
+                'identifier': context.get_conf().get('series', 'default')
+            })
         return mp
 
 class GMT2(tzinfo):
@@ -560,7 +606,7 @@ class SetUserClass(Gtk.Widget):
     """
     __gtype_name__ = 'SetUserClass'
 
-    def __init__(self, _logger=None, title="Get My Info"):
+    def __init__(self, _logger=None, title="Get My Info", client=None):
         """
         """
         self.id = ""
@@ -569,11 +615,12 @@ class SetUserClass(Gtk.Widget):
         self.series_id = ""
         self.series_title = ""
         self.searching = False
+        self.details = None
 
         self.__logger = _logger
-        self.__url = config.get(URL_FIND, DEFAULT_FIND_URL)
-        self.__create_url = config.get(URL_CREATE, DEFAULT_CREATE_URL)
-        self.__session = FuturesSession()
+        self.__oc_client = client
+
+        self.series_filter = config.get(CONFIG_SERIES_FILTER, DEFAULT_SERIES_FILTER)
 
         regexp = config.get(CONFIG_REGEXP, DEFAULT_REGEXP)
         self.__logger.info("REGEXP = " + regexp)
@@ -641,17 +688,17 @@ class SetUserClass(Gtk.Widget):
 
     def on_key_release(self, widget, ev, data=None):
 
-        #If Escape pressed, reset text
+        # If Escape pressed, reset text
         if ev.keyval == Gdk.KEY_Escape:
             widget.set_text("")
             self.clear_search_entry()
 
-        #If Enter pressed, try searching
+        # If Enter pressed, try searching
         if ev.keyval == Gdk.KEY_Return or ev.keyval == Gdk.KEY_KP_Enter:
             self.do_search(widget.get_text())
 
         if self.__regexp.match(widget.get_text()): # if valid search
-            #self.__logger.info("found :) " + widget.get_text())
+            self.__logger.info("found :) " + widget.get_text())
             if not self.searching:
                 self.do_search(widget.get_text())
 
@@ -682,8 +729,7 @@ class SetUserClass(Gtk.Widget):
         self.result.pack_start(label, expand=False, fill=False, padding=0)
 
     def do_search(self, value):
-        self.__logger.info("Searching : " + self.__url + value)
-
+        self.__logger.info("Searching for " + value)
         self.searching = True
         self.search_field.set_editable(False) # disabled
 
@@ -709,65 +755,58 @@ class SetUserClass(Gtk.Widget):
         self.result.pack_start(loading_box, expand=False, fill=False, padding=0)
         self.result.show_all()
 
-        #future = self.__session.get(self.__url + value, background_callback=self.show_response)
-        self.show_response(None, requests.get(self.__url + value)) # static request
+        self.show_response( self.call_get_user_info(value) ) # static request
 
-    def show_response(self, sess, resp):
-        self.__logger.info("GET request returned.")
-        #self.__logger.info(resp)
+    def show_response(self, details):
+        self.__logger.info("Got search results back")
 
         for element in self.result.get_children():
             self.result.remove(element)
 
-        if resp.ok:
-            details = json.loads(resp.content, object_hook=lambda d: namedtuple('X', d.keys())(*d.values()))
+        if details['fullname']:
+            self.details = details
+            self.id = details['username']
+            self.user_name = details['fullname']
+            self.user_email = details['email']
 
-            if details.fullname:
-                self.id = details.username
-                self.user_name = details.fullname
-                self.user_email = details.email
+            result_box = Gtk.Box(spacing=30)
+            result_box.set_name("grd_result_button")
 
-                result_box = Gtk.Box(spacing=30)
-                result_box.set_name("grd_result_button")
+            self.user_button = Gtk.Button()
+            self.user_button.set_name("btn_select_user")
+            self.user_button.set_relief(Gtk.ReliefStyle.NONE)
+            button_box = Gtk.Box(spacing=10)
+            self.user_button.add(button_box)
 
-                self.user_button = Gtk.Button()
-                self.user_button.set_name("btn_select_user")
-                self.user_button.set_relief(Gtk.ReliefStyle.NONE)
-                button_box = Gtk.Box(spacing=10)
-                self.user_button.add(button_box)
+            self.__logger.info("Found: " + details['fullname'])
+            label = Gtk.Label(details['fullname'])
 
-                #self.__logger.info("Found: " + details.fullname)
-                label = Gtk.Label(details.fullname)
+            img_series = Gtk.Image()
 
-                img_series = Gtk.Image()
-
-                if details.ocSeries:
-                    img_series.set_from_icon_name("object-select-symbolic", 2)
-                    #self.__logger.info("     Series: " + details.ocSeries[0].identifier)
-                    self.user_button.connect("clicked", self.close_modal)
-                    self.series_id = details.ocSeries[0].identifier
-                    self.series_title = details.ocSeries[0].title
-                else:
-                    img_series.set_from_icon_name("star-new-symbolic", 2)
-                    self.user_button.connect("clicked", self.create_series)
-                    self.series_id = ""
-                    self.series_title = ""
-
-                button_box.pack_start(img_series, expand=False, fill=False, padding=10)
-                button_box.pack_start(label, expand=False, fill=False, padding=10)
-
-                label = Gtk.Label("select")
-                label.set_markup('<span foreground="#494941" face="sans" size="small">select</span>')
-                button_box.pack_start(label, expand=False, fill=False, padding=10)
-
-                result_box.pack_start(self.user_button, expand=True, fill=True, padding=10)
-                self.result.pack_start(result_box, expand=False, fill=False, padding=0)
+            if details['ocSeries']:
+                self.__logger.info("     Series: " + details['ocSeries'][0]['identifier'])
+                img_series.set_from_icon_name("object-select-symbolic", 2)
+                self.user_button.connect("clicked", self.close_modal)
+                self.series_id = details['ocSeries'][0]['identifier']
+                self.series_title = details['ocSeries'][0]['title']
             else:
-                #self.__logger.info(":(")
-                label = Gtk.Label("No student or lecturer found.")
-                self.result.pack_start(label, expand=False, fill=False, padding=0)
+                img_series.set_from_icon_name("star-new-symbolic", 2)
+                self.user_button.connect("clicked", self.create_series)
+                self.series_id = ""
+                self.series_title = ""
 
+            button_box.pack_start(img_series, expand=False, fill=False, padding=10)
+            button_box.pack_start(label, expand=False, fill=False, padding=10)
+
+            label = Gtk.Label("select")
+            label.set_markup('<span foreground="#494941" face="sans" size="small">select</span>')
+            button_box.pack_start(label, expand=False, fill=False, padding=10)
+
+            result_box.pack_start(self.user_button, expand=True, fill=True, padding=10)
+            self.result.pack_start(result_box, expand=False, fill=False, padding=0)
         else:
+            self.__logger.info(":(")
+            self.details = None
             label = Gtk.Label("No student or lecturer found.")
             self.result.pack_start(label, expand=False, fill=False, padding=0)
 
@@ -779,7 +818,6 @@ class SetUserClass(Gtk.Widget):
         conf = context.get_conf()
 
         self.__logger.info("Creating series")
-        self.__logger.info(conf.get_hostname())
 
         if self.user_button is not None:
             self.user_button.set_sensitive(False) # disabled
@@ -806,25 +844,122 @@ class SetUserClass(Gtk.Widget):
         self.result.pack_start(loading_box, expand=False, fill=False, padding=0)
         self.result.show_all()
 
-        #future = self.__session.post(self.__create_url + self.id, background_callback=self.set_series_close_modal)
-        self.set_series_close_modal(None, requests.post(self.__create_url + self.id, data={'hostname': conf.get_hostname()}))
+        self.set_series_close_modal(self.call_create_series(self.details))
 
-    def set_series_close_modal(self, sess, resp):
+    def set_series_close_modal(self, resp):
         self.__logger.info("POST request returned.")
-        #self.__logger.info(resp)
 
-        if resp.ok:
-            details = json.loads(resp.content, object_hook=lambda d: namedtuple('X', d.keys())(*d.values()))
+        if resp is not None:
+            self.series_id = resp
+            self.series_title = "Created Series: " + resp
+            self.close_modal()
+        else:
+            self.series_id = ""
+            self.series_title = ""
 
-            if details.identifier:
-                self.series_id = details.identifier
-                self.series_title = details.title
-            else:
-                self.series_id = ""
-                self.series_title = ""
+            for element in self.result.get_children():
+                self.result.remove(element)
 
-        self.close_modal()
+            loading_box = Gtk.Box(spacing=10)
+            loading_box.set_name("grd_result_loading")
+
+            label = Gtk.Label("")
+            loading_box.pack_start(label, expand=False, fill=False, padding=0)
+
+            img_error = Gtk.Image()
+            img_error.set_from_icon_name("emblem-important", 5)
+            loading_box.pack_start(img_error, expand=False, fill=False, padding=8)
+
+            label = Gtk.Label("Could not create user profile")
+            loading_box.pack_start(label, expand=False, fill=False, padding=0)
+
+            label = Gtk.Label("")
+            loading_box.pack_start(label, expand=False, fill=False, padding=0)
+
+            self.result.pack_start(loading_box, expand=False, fill=False, padding=0)
+            self.result.show_all()
 
     def close_modal(self, ev=None):
         self.__logger.info("closing modal")
         self.dialog.response(-10)
+
+    def call_get_user_info(self, user_id):
+        """
+        Retreive user and series info from Opencast
+
+        :param id: Staff / T / Student Number
+
+        :return: Return dictionary structured content to set display name and series
+
+        :raise ValueError: if the input arguments are not valid
+        :raise OpencastException: if the communication to the opencast server fails
+                                or an unexpected error occures
+        """
+        if not user_id:
+            raise ValueError("user ID isn't set")
+
+        result_data = {'fullname': '', 'email': '', 'username': '', 'site_id' : '', 'ocSeries' : [],
+                       'ca_name': self.__oc_client.hostname}
+
+        try:
+            response = self.__oc_client.get_user_details(user_id)
+            full_data = json.loads(response, encoding='utf8')
+            # self.__logger.info(full_data)
+
+            if full_data['user']['name']:
+                result_data['fullname'] = full_data['user']['name']
+                result_data['email'] = full_data['user']['email'].lower()
+                result_data['username'] = full_data['user']['username'].lower()
+                result_data['upperuser'] = full_data['user']['username'].upper()
+
+        except Exception as exc:
+            self.__logger.warning('call_get_user_info user [{1}]: {0}'.format(exc, user_id))
+
+        try:
+            response = self.__oc_client.get_personal_series(user_id, self.series_filter)
+
+            if "Personal Series" in response:
+                series_data = json.loads(response, encoding='utf8')
+
+                if len(series_data) > 0:
+                    result_data['ocSeries'] = series_data
+
+        except Exception as exc:
+            self.__logger.error('call_get_user_info series [{1}]: {0}'.format(exc, user_id))
+
+        # self.__logger.info(result_data)
+        return result_data
+
+    def call_create_series(self, data):
+        """
+        Create a new Opencast Series with the data given
+
+        :param data: Contains info about the series to be created
+
+        :return: Return dictionary structured content to set display name and series
+
+        :raise ValueError: if the input arguments are not valid
+        :raise OpencastException: if the communication to the opencast server fails
+                                or an unexpected error occures
+        """
+        global METADATA, ACL
+
+        if not data:
+            raise ValueError("user data isn't set")
+
+        result = None
+        try:
+            m = METADATA.safe_substitute(data).encode('iso-8859-1')
+            a = ACL.safe_substitute(data).encode('iso-8859-1')
+
+            response = self.__oc_client.create_series(m, a)
+            if response is not None:
+                if "identifier" in response:
+                    details = json.loads(response, object_hook=lambda d: namedtuple('X', d.keys())(*d.values()))
+                    if details.identifier:
+                        result = details.identifier
+
+        except Exception as exc:
+            self.__logger.error('call_create_series: {}'.format(exc))
+
+        return result

@@ -1,0 +1,32 @@
+[
+    {
+        "allow": true,
+        "role": "ROLE_USER_$upperuser",
+        "action": "read"
+    },
+    {
+        "allow": true,
+        "role": "ROLE_USER_$upperuser",
+        "action": "write"
+    },
+    {
+        "allow": true,
+        "role": "ROLE_USER_$username",
+        "action": "read"
+    },
+    {
+        "allow": true,
+        "role": "ROLE_USER_$username",
+        "action": "write"
+    },
+    {
+        "allow": true,
+        "role": "ROLE_CILT_OBS",
+        "action": "read"
+    },
+    {
+        "allow": true,
+        "role": "ROLE_CILT_OBS",
+        "action": "write"
+    }
+]

@@ -1,0 +1,78 @@
+[
+    {
+        "flavor": "dublincore/series",
+        "title": "Opencast Series DublinCore",
+        "fields": [
+            {
+                "id": "title",
+                "type": "text",
+                "value": "Personal Series ($fullname)"
+            },
+            {
+                "id": "subjects",
+                "type": "text",
+                "value": [
+                    "Personal"
+                ]
+            },
+            {
+                "id": "description",
+                "type": "text",
+                "value": "Personal series: $fullname ($email)"
+            },
+            {
+                "id": "language",
+                "type": "text",
+                "value": "eng"
+            },
+            {
+                "id": "rightsHolder",
+                "type": "text",
+                "value": "The University of Cape Town"
+            },
+            {
+                "id": "license",
+                "type": "text",
+                "value": "ALLRIGHTS"
+            },
+            {
+                "id": "creator",
+                "type": "mixed_text",
+                "value": [
+                    "$fullname"
+                ]
+            },
+            {
+                "id": "contributor",
+                "type": "mixed_text",
+                "value": [
+                    "$username",
+                    "$fullname"
+                ]
+            },
+            {
+                "id": "publisher",
+                "type": "mixed_text",
+                "value": [
+                    "$fullname"
+                ]
+            }
+        ]
+    },
+    {
+        "flavor": "ext/series",
+        "title": "UCT Series Extended Metadata",
+        "fields": [
+            {
+                "id": "creator-id",
+                "type": "text",
+                "value": "$username"
+            },
+            {
+                "id": "retention-cycle",
+                "type": "text",
+                "value": "normal"
+            }
+        ]
+    }
+]
