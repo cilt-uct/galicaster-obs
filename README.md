@@ -2,13 +2,15 @@
 
 This Galicaster (https://github.com/teltek/Galicaster) plugin links the complete One Button Studio process flow:
 
-1. Retrieves bookings made from Outlook (https://github.com/cilt-uct/obs-webservice) and "My Videos" tool linked to Vula [Sakai (https://github.com/sakaiproject/sakai)]
+1. Retrieves bookings made from Outlook (https://github.com/cilt-uct/obs-webservice) and adds a "My Videos" tool linked to Vula [Sakai (https://github.com/sakaiproject/sakai)].
 2. Communicates with Opencast (https://github.com/opencast/opencast) to:
   * Link to personal series or
-  * Create personal series if it doesn't exist
-  _NOTE:_ if you just want this functonality it is available as this plugin: Galicaster Select User (https://github.com/cilt-uct/galicaster-select-user)
-3. Integrates with the Powermate Button to trigger recordings
-4. Control the Mascot light and Notification lights (Red for recording / Green for ready)
+  * Create personal series if it doesn't exist.
+  
+  _NOTE:_ if you just want this functonality it is available in this plugin: Galicaster Select User (https://github.com/cilt-uct/galicaster-select-user).
+  
+3. Integrates with the Powermate Button to trigger recordings.
+4. Control the Mascot light and Notification lights (Red for recording / Green for ready).
 5. After upload/ingest the "My Videos" will be created in a workflow if it doesn't already exists.
 
 ## Installation
