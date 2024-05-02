@@ -28,6 +28,12 @@ _NOTE:_
   * `resources/ui/acl_template.json` contains the template for creating ACL's for the new series.
   * `resources/ui/set_user.glade` contains the UI elemnts for popup that shows the user selection input.
 
+## Dependencies
+```
+pip install tzlocal pyautogui evdev requests requests_futures
+apt-get install python3-tk python3-dev
+```
+
 ## Configuration
 ```
 vi /etc/galicaster/conf.ini
