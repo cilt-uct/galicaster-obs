@@ -72,6 +72,11 @@
                 "id": "retention-cycle",
                 "type": "text",
                 "value": "normal"
+            },
+            {
+                "id": "caption-type",
+                "type": "text",
+                "value": "google"
             }
         ]
     }
